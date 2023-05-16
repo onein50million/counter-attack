@@ -1,0 +1,13 @@
+[package]
+name = "counter-attack"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bevy = "0.10.1"
+bytemuck = "1.13.1"
+clap = { version = "4.2.7", features = ["derive"] }
+ggrs = { version = "0.9.4", features = ["sync-send"] }
+iunorm = "0.2.1"
