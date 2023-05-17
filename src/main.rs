@@ -3,7 +3,7 @@ mod ui;
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
-    net::{SocketAddr},
+    net::SocketAddr,
     thread::sleep,
     time::{Duration, Instant},
 };
@@ -16,15 +16,20 @@ use bevy::{
 use bytemuck::{Pod, Zeroable};
 use clap::Parser;
 use ggrs::{
-    Config, GGRSRequest, InputStatus, P2PSession, PlayerType, SessionBuilder, UdpNonBlockingSocket, PlayerHandle,
+    Config, GGRSRequest, InputStatus, P2PSession, PlayerHandle, PlayerType, SessionBuilder,
+    UdpNonBlockingSocket,
 };
 use iunorm::{Inorm64, Unorm64};
-use ui::{GUI, Roboto};
+use ui::{Roboto, GUI};
+
+//https://freesound.org/people/aarrnnoo/sounds/516189/
 
 const FRAMETIME: usize = 100;
 const FPS: usize = 1000 / FRAMETIME;
 const VOLUME_SCALE: f32 = 0.5;
-const BASE_STAMINA_LOSS: f64 = 0.1;
+const BASE_STAMINA_LOSS: f64 = 0.5;
+const CLASH_LENGTH: Duration = Duration::from_millis(4000);
+const FINAL_CLASH_LIVES: u8 = 8;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -81,11 +86,20 @@ impl FrameOffset {
     fn to_instant(&self, last_tick_time: &LastTickTime) -> Instant {
         let offset = Unorm64(self.offset).to_f64();
         let frame_delta = last_tick_time.frame_number as f64 - self.frame as f64;
-        let frame_delta = frame_delta * (FRAMETIME as f64 / 1000.0) + offset;
+        let frame_delta = (frame_delta + offset) * (FRAMETIME as f64 / 1000.0);
         if frame_delta > 0.0 {
-            last_tick_time.frame_instant - Duration::from_secs_f64(frame_delta)
+            last_tick_time.frame_instant + Duration::from_secs_f64(frame_delta)
         } else {
-            last_tick_time.frame_instant + Duration::from_secs_f64(frame_delta.abs())
+            last_tick_time.frame_instant - Duration::from_secs_f64(frame_delta.abs())
+        }
+    }
+    fn get_offset_seconds(&self, other: &Self, last_tick_time: &LastTickTime) -> f64 {
+        let self_instant = self.to_instant(last_tick_time);
+        let other_instant = other.to_instant(last_tick_time);
+        if self_instant > other_instant {
+            self_instant.duration_since(other_instant).as_secs_f64()
+        } else {
+            -other_instant.duration_since(self_instant).as_secs_f64()
         }
     }
     fn is_valid(&self) -> bool {
@@ -100,6 +114,8 @@ struct Player {
     attack_recover_time: FrameOffset,
     last_defend_result: i64,
     stamina: Unorm64,
+    final_clash_lives: u8,
+    final_clash_last_swing: Option<FrameOffset>,
 }
 impl Player {
     fn swing(
@@ -110,7 +126,10 @@ impl Player {
         attack: Attack,
     ) -> Option<f64> {
         self.attack_start_time = frame_offset;
-        self.attack_recover_time = FrameOffset::from_instant(frame_offset.to_instant(&last_tick_time) + attack.startup_time + attack.recover_time, &last_tick_time);
+        self.attack_recover_time = FrameOffset::from_instant(
+            frame_offset.to_instant(&last_tick_time) + attack.startup_time + attack.recover_time,
+            &last_tick_time,
+        );
         self.current_attack = Some(attack);
 
         let defend_time = frame_offset.to_instant(&last_tick_time);
@@ -126,6 +145,12 @@ impl Player {
         dbg!(defend_time_offset);
         self.last_defend_result = Inorm64::from_f64(defend_time_offset).0;
         Some(defend_time_offset)
+    }
+    fn take_final_clash_life(&mut self) {
+        // self.final_clash_last_swing = None;
+        if self.final_clash_lives > 0 {
+            self.final_clash_lives -= 1;
+        }
     }
 }
 
@@ -150,9 +175,16 @@ impl Config for GGRSConfig {
     type Address = SocketAddr;
 }
 
+#[derive(Resource, Clone, Hash)]
+struct FinalClash {
+    next_clash: Option<FrameOffset>,
+}
+
 #[derive(Clone, Hash)]
 struct WorldSnapshot {
     players: [Player; 2],
+    final_clash: FinalClash,
+    game_state: GameState,
 }
 
 #[derive(Resource)]
@@ -162,25 +194,26 @@ struct Session(P2PSession<GGRSConfig>);
 struct SoundLibrary {
     block: Handle<AudioSource>,
     perfect_block: Handle<AudioSource>,
+    flesh_cut: Handle<AudioSource>
 }
 
 #[derive(Component)]
 pub struct LocalMarker;
 
+#[derive(Component)]
+pub struct FinalClashLives;
 pub struct BlockEvent(String);
-pub enum GameEvent{
-    GameOver{
-        loser: PlayerHandle
-    }
+pub enum GameEvent {
+    GameOver { loser: Option<PlayerHandle> },
+}
+#[derive(Clone, Hash, Resource, Default, PartialEq, Eq, Debug)]
+pub enum GameState {
+    #[default]
+    Playing,
+    FinalClash,
+    Over,
 }
 
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Hash, States)]
-pub enum GameState{
-    #[default]
-    Waiting,
-    Started,
-    Over
-}
 fn main() {
     let args = Args::parse();
 
@@ -191,10 +224,7 @@ fn main() {
         .unwrap()
         .add_player(PlayerType::Local, 0)
         .unwrap()
-        .add_player(
-            PlayerType::Remote(args.remote_addr),
-            1,
-        )
+        .add_player(PlayerType::Remote(args.remote_addr), 1)
         .unwrap();
 
     let udp_socket = UdpNonBlockingSocket::bind_to_port(args.local_port).unwrap();
@@ -209,27 +239,32 @@ fn main() {
     .add_plugin(LogDiagnosticsPlugin::default())
     .add_plugin(FrameTimeDiagnosticsPlugin::default())
     .add_plugin(GUI)
-    .add_state::<GameState>()
+    // .add_state::<GameState>()
     .add_event::<BlockEvent>()
     .add_event::<GameEvent>()
     .add_startup_system(setup_players)
     .add_startup_system(setup_audio)
     .add_system(input)
-    .add_system(rollback_system.run_if(on_timer(Duration::from_millis(
-        FRAMETIME.try_into().unwrap(),
-    )).and_then(not(in_state(GameState::Over)))))
+    .add_system(
+        rollback_system.run_if(
+            on_timer(Duration::from_millis(FRAMETIME.try_into().unwrap()))
+                .and_then(not(resource_exists_and_equals(GameState::Over))),
+        ),
+    )
     .add_system(network_stats.run_if(on_timer(Duration::from_secs_f64(5.0))))
     .add_system(poll_clients)
-    .add_system(handle_game_events.run_if(not(in_state(GameState::Over))))
+    .add_system(handle_game_events.run_if(not(resource_exists_and_equals(GameState::Over))))
     .insert_resource(Session(session))
     .insert_resource(LastTickTime {
         frame_number: 0,
         frame_instant: Instant::now(),
     })
+    .insert_resource(FinalClash { next_clash: None })
     .insert_resource(LocalInput {
         attacking: None,
         // defending: None,
     })
+    .insert_resource(GameState::default())
     .run();
 }
 
@@ -242,6 +277,7 @@ fn setup_audio(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(SoundLibrary {
         block: asset_server.load("block.ogg"),
         perfect_block: asset_server.load("perfect_block.ogg"),
+        flesh_cut: asset_server.load("flesh_cut.ogg"),
     });
 }
 
@@ -253,6 +289,8 @@ fn setup_players(mut commands: Commands, last_tick_time: Res<LastTickTime>) {
             attack_recover_time: FrameOffset::from_instant(Instant::now(), &last_tick_time),
             last_defend_result: 0,
             stamina: Unorm64(u64::MAX),
+            final_clash_last_swing: None,
+            final_clash_lives: FINAL_CLASH_LIVES,
         })
         .insert(LocalMarker);
     commands.spawn(Player {
@@ -261,6 +299,8 @@ fn setup_players(mut commands: Commands, last_tick_time: Res<LastTickTime>) {
         attack_recover_time: FrameOffset::from_instant(Instant::now(), &last_tick_time),
         last_defend_result: 0,
         stamina: Unorm64(u64::MAX),
+        final_clash_last_swing: None,
+        final_clash_lives: FINAL_CLASH_LIVES,
     });
 }
 
@@ -295,20 +335,22 @@ fn poll_clients(mut session: ResMut<Session>) {
 fn handle_game_events(
     mut commands: Commands,
     mut ev_game: EventReader<GameEvent>,
-    mut next_state: ResMut<NextState<GameState>>,
+    mut state: ResMut<GameState>,
     roboto: Res<Roboto>,
-){
-    for event in ev_game.into_iter(){
-        match event{
+) {
+    for event in ev_game.into_iter() {
+        match event {
             GameEvent::GameOver { loser } => {
                 println!("Game over!");
                 let text;
-                if loser == &0{
+                if loser.is_none() {
+                    text = "Tie"
+                } else if loser.unwrap() == 0 {
                     text = "Defeat"
-                }else{
+                } else {
                     text = "Victory"
                 }
-                next_state.set(GameState::Over);
+                *state = GameState::Over;
 
                 commands.spawn(TextBundle {
                     text: Text::from_section(
@@ -335,7 +377,7 @@ fn handle_game_events(
                     },
                     ..Default::default()
                 });
-            },
+            }
         }
     }
 }
@@ -346,11 +388,13 @@ fn rollback_system(
     mut last_tick_time: ResMut<LastTickTime>,
     mut local_player_query: Query<&mut Player, With<LocalMarker>>,
     mut remote_player_query: Query<&mut Player, Without<LocalMarker>>,
+    mut final_clash: ResMut<FinalClash>,
     // mut text_query: Query<&mut Text, With<BlockQualityIndicator>>,
     mut ev_block: EventWriter<BlockEvent>,
     mut ev_game: EventWriter<GameEvent>,
     audio_library: ResMut<SoundLibrary>,
     audio: Res<Audio>,
+    mut game_state: ResMut<GameState>,
     // audio_sinks: Res<Assets<AudioSink>>,
 ) {
     let attacking = if let Some(attacking) = local_input.attacking {
@@ -376,15 +420,14 @@ fn rollback_system(
         for request in session {
             match request {
                 GGRSRequest::SaveGameState { cell, frame } => {
-                    // println!("SaveGameState");
-                    // dbg!(frame);
-                    // let mut player_iter = player_query.iter();
                     assert_eq!(last_tick_time.frame_number as i32, frame);
                     let world_snapshot = WorldSnapshot {
                         players: [
                             local_player_query.single().clone(),
                             remote_player_query.single().clone(),
                         ],
+                        final_clash: final_clash.clone(),
+                        game_state: game_state.clone(),
                     };
                     let mut hasher = DefaultHasher::new();
                     world_snapshot.hash(&mut hasher);
@@ -395,8 +438,6 @@ fn rollback_system(
                     )
                 }
                 GGRSRequest::LoadGameState { cell, frame } => {
-                    // println!("LoadGameState");
-                    // dbg!(frame);
                     let world_snapshot: WorldSnapshot = cell.load().unwrap();
 
                     *local_player_query.single_mut() = world_snapshot.players[0].clone();
@@ -413,22 +454,30 @@ fn rollback_system(
                             - Duration::from_millis(FRAMETIME as u64)
                                 * frame_delta.abs().try_into().unwrap()
                     };
-
+                    *game_state = world_snapshot.game_state;
+                    *final_clash = world_snapshot.final_clash;
                     *last_tick_time = LastTickTime {
                         frame_number: frame as usize,
                         frame_instant: new_instant,
                     };
                 }
                 GGRSRequest::AdvanceFrame { inputs } => {
-                    // println!("AdvanceFrame");
                     *last_tick_time = LastTickTime {
                         frame_number: last_tick_time.frame_number + 1,
-                        // frame_instant: last_tick_time.frame_instant + Duration::from_millis(FRAMETIME as u64),
                         frame_instant: Instant::now(),
                     };
+                    if matches!(*game_state, GameState::FinalClash) {
+                        if final_clash.next_clash.is_none() {
+                            let now = FrameOffset::from_instant(Instant::now(), &last_tick_time).to_instant(&last_tick_time);
+                            final_clash.next_clash = Some(FrameOffset::from_instant(
+                                now + CLASH_LENGTH,
+                                &last_tick_time,
+                            ));
+                        }
+                    }
+
                     for (handle, (received_input, status)) in inputs.into_iter().enumerate() {
                         assert!(!matches!(status, InputStatus::Disconnected));
-                        // dbg!(received_input);
                         let (mut current_player, mut other_player) = if handle == 0 {
                             (
                                 local_player_query.single_mut(),
@@ -440,91 +489,204 @@ fn rollback_system(
                                 local_player_query.single_mut(),
                             )
                         };
-                        let mut stamina_loss = Unorm64(0);
-                        if received_input.attacking.is_valid() {
-                            let swing_result = current_player.swing(
-                                &mut other_player,
-                                received_input.attacking,
-                                &last_tick_time,
-                                TEST_ATTACK,
-                            );
-                            if let Some(swing_result) = swing_result {
-                                let block_quality =
-                                    1.0 - (swing_result.abs() as f32).clamp(0.0, 1.0);
-                                let sound_block_quality = block_quality.powf(16.0);
-                                audio.play_with_settings(
-                                    audio_library.block.clone(),
-                                    PlaybackSettings {
-                                        repeat: false,
-                                        volume: (1.0 - sound_block_quality) * VOLUME_SCALE,
-                                        speed: 1.0,
-                                    },
-                                );
-                                audio.play_with_settings(
-                                    audio_library.perfect_block.clone(),
-                                    PlaybackSettings {
-                                        repeat: false,
-                                        volume: sound_block_quality * VOLUME_SCALE,
-                                        speed: 1.0,
-                                    },
-                                );
 
-                                // let mut text = text_query.single_mut();
-                                // text.sections[0].style.color.set_a(1.0);
+                        if matches!(*game_state, GameState::FinalClash) {
+                            if received_input.attacking.is_valid()
+                                && current_player.final_clash_last_swing.is_none()
+                            {
+                                current_player.final_clash_last_swing =
+                                    Some(received_input.attacking);
+                            }
+                        } else {
+                            if received_input.attacking.is_valid() {
+                                let swing_result = current_player.swing(
+                                    &mut other_player,
+                                    received_input.attacking,
+                                    &last_tick_time,
+                                    TEST_ATTACK,
+                                );
+                                if let Some(swing_result) = swing_result {
+                                    let mut stamina_loss;
+                                    let block_quality =
+                                        1.0 - (swing_result.abs() as f32).clamp(0.0, 1.0);
+                                    let sound_block_quality = block_quality.powf(16.0);
+                                    audio.play_with_settings(
+                                        audio_library.block.clone(),
+                                        PlaybackSettings {
+                                            repeat: false,
+                                            volume: (1.0 - sound_block_quality) * VOLUME_SCALE,
+                                            speed: 1.0,
+                                        },
+                                    );
+                                    audio.play_with_settings(
+                                        audio_library.perfect_block.clone(),
+                                        PlaybackSettings {
+                                            repeat: false,
+                                            volume: sound_block_quality * VOLUME_SCALE,
+                                            speed: 1.0,
+                                        },
+                                    );
 
-                                let is_local = handle == 0;
-                                if block_quality == 1.0 {
-                                    if is_local {
-                                        ev_block.send(BlockEvent("INHUMAN BLOCK".into()));
+                                    let is_local = handle == 0;
+                                    if block_quality == 1.0 {
+                                        if is_local {
+                                            ev_block.send(BlockEvent("INHUMAN BLOCK".into()));
+                                        }
+                                        stamina_loss = Unorm64::from_f64(BASE_STAMINA_LOSS * 0.01);
+                                    } else if block_quality > 0.999 {
+                                        if is_local {
+                                            ev_block.send(BlockEvent("Perfect Block".into()));
+                                        }
+                                        stamina_loss = Unorm64::from_f64(BASE_STAMINA_LOSS * 0.1);
+                                    } else if block_quality > 0.99 {
+                                        if is_local {
+                                            ev_block.send(BlockEvent("Excellent Block".into()));
+                                        }
+                                        stamina_loss = Unorm64::from_f64(BASE_STAMINA_LOSS * 0.25);
+                                    } else if block_quality > 0.9 {
+                                        if is_local {
+                                            ev_block.send(BlockEvent("Good Block".into()));
+                                        }
+                                        stamina_loss = Unorm64::from_f64(BASE_STAMINA_LOSS * 0.5);
+                                    } else if block_quality > 0.8 {
+                                        if is_local {
+                                            ev_block.send(BlockEvent("Decent Block".into()));
+                                        }
+                                        stamina_loss = Unorm64::from_f64(BASE_STAMINA_LOSS * 1.0);
+                                    } else {
+                                        if is_local {
+                                            ev_block.send(BlockEvent("Sloppy Block".into()));
+                                        }
+                                        stamina_loss = Unorm64::from_f64(BASE_STAMINA_LOSS * 1.2);
                                     }
-                                    stamina_loss = Unorm64::from_f64(BASE_STAMINA_LOSS * 0.01);
-                                } else if block_quality > 0.999 {
-                                    if is_local {
-                                        ev_block.send(BlockEvent("Perfect Block".into()));
+                                    if let Some(current_attack) = &other_player.current_attack {
+                                        if FrameOffset::from_instant(Instant::now(), &last_tick_time)
+                                            .to_instant(&last_tick_time)
+                                            > other_player.attack_start_time.to_instant(&last_tick_time)
+                                                + current_attack.startup_time
+                                                + current_attack.block_grace
+                                        {
+                                            stamina_loss = Unorm64::from_f64(BASE_STAMINA_LOSS * 1.5);
+                                            other_player.current_attack = None;
+                                        }
                                     }
-                                    stamina_loss = Unorm64::from_f64(BASE_STAMINA_LOSS * 0.1);
-                                } else if block_quality > 0.99 {
-                                    if is_local {
-                                        ev_block.send(BlockEvent("Excellent Block".into()));
+                                    if stamina_loss < current_player.stamina {
+                                        current_player.stamina.0 -= stamina_loss.0;
+                                    } else {
+                                        if current_player.stamina == Unorm64(0) {
+                                            ev_game.send(GameEvent::GameOver {
+                                                loser: Some(handle),
+                                            });
+                                        } else {
+                                            current_player.stamina = Unorm64(0);
+                                        }
                                     }
-                                    stamina_loss = Unorm64::from_f64(BASE_STAMINA_LOSS * 0.25);
-                                } else if block_quality > 0.9 {
-                                    if is_local {
-                                        ev_block.send(BlockEvent("Good Block".into()));
-                                    }
-                                    stamina_loss = Unorm64::from_f64(BASE_STAMINA_LOSS * 0.5);
-                                } else if block_quality > 0.8 {
-                                    if is_local {
-                                        ev_block.send(BlockEvent("Decent Block".into()));
-                                    }
-                                    stamina_loss = Unorm64::from_f64(BASE_STAMINA_LOSS * 1.0);
-                                } else {
-                                    if is_local {
-                                        ev_block.send(BlockEvent("Sloppy Block".into()));
-                                    }
-                                    stamina_loss = Unorm64::from_f64(BASE_STAMINA_LOSS * 1.2);
                                 }
                             }
                         }
-                        if let Some(current_attack) = &other_player.current_attack {
-                            if FrameOffset::from_instant(Instant::now(), &last_tick_time)
-                                .to_instant(&last_tick_time)
-                                > other_player.attack_start_time.to_instant(&last_tick_time)
-                                    + current_attack.startup_time
-                                    + current_attack.block_grace
+                    }
+                    let (mut local_player, mut remote_player) = {
+                        (
+                            local_player_query.single_mut(),
+                            remote_player_query.single_mut(),
+                        )
+                    };
+                    if matches!(*game_state, GameState::FinalClash) {
+                        if let Some(next_clash) = final_clash.next_clash {
+                            if final_clash.next_clash.unwrap().get_offset_seconds(
+                                &FrameOffset::from_instant(Instant::now(), &last_tick_time),
+                                &last_tick_time,
+                            ) < (-CLASH_LENGTH.as_secs_f64())
                             {
-                                stamina_loss = Unorm64::from_f64(BASE_STAMINA_LOSS * 1.5);
-                                other_player.current_attack = None;
+                                println!("next clash");
+                                if local_player.final_clash_last_swing.is_none() {
+                                    local_player.take_final_clash_life();
+                                    if remote_player.final_clash_last_swing.is_some(){
+                                        audio.play_with_settings(
+                                            audio_library.flesh_cut.clone(),
+                                            PlaybackSettings {
+                                                repeat: false,
+                                                volume: 1.0 * VOLUME_SCALE,
+                                                speed: 1.0,
+                                            },
+                                        );
+                                    }
+                                }
+                                if remote_player.final_clash_last_swing.is_none() {
+                                    remote_player.take_final_clash_life();
+                                    if local_player.final_clash_last_swing.is_some(){
+                                        audio.play_with_settings(
+                                            audio_library.flesh_cut.clone(),
+                                            PlaybackSettings {
+                                                repeat: false,
+                                                volume: 1.0 * VOLUME_SCALE,
+                                                speed: 1.0,
+                                            },
+                                        );
+                                    }
+                                }
+
+                                final_clash.next_clash = None;
+                                local_player.final_clash_last_swing = None;
+                                remote_player.final_clash_last_swing = None;
+
+                            } else {
+                                match (
+                                    local_player.final_clash_last_swing,
+                                    remote_player.final_clash_last_swing,
+                                ) {
+                                    (Some(local_clash), Some(remote_clash)) => {
+                                        let local_offset = local_clash
+                                            .get_offset_seconds(&next_clash, &last_tick_time);
+                                        let remote_offset = remote_clash
+                                            .get_offset_seconds(&next_clash, &last_tick_time);
+                                        if local_offset.abs() < remote_offset.abs() {
+                                            remote_player.take_final_clash_life()
+                                        }
+                                        if remote_offset.abs() < local_offset.abs() {
+                                            local_player.take_final_clash_life()
+                                        }
+
+                                        audio.play_with_settings(
+                                            audio_library.block.clone(),
+                                            PlaybackSettings {
+                                                repeat: false,
+                                                volume: 1.0 * VOLUME_SCALE,
+                                                speed: 1.0,
+                                            },
+                                        );
+
+                                        final_clash.next_clash = None;
+                                        local_player.final_clash_last_swing = None;
+                                        remote_player.final_clash_last_swing = None;
+                                    }
+                                    (_, _) => {}
+                                }
+
+
+                            }
+
+                            let local_dead = local_player.final_clash_lives == 0;
+                            let remote_dead = remote_player.final_clash_lives == 0;
+                            match (local_dead, remote_dead) {
+                                (true, true) => ev_game.send(GameEvent::GameOver { loser: None }),
+                                (true, false) => {
+                                    ev_game.send(GameEvent::GameOver { loser: Some(1) })
+                                }
+                                (false, true) => {
+                                    ev_game.send(GameEvent::GameOver { loser: Some(0) })
+                                }
+                                (false, false) => {}
                             }
                         }
-                        if stamina_loss < current_player.stamina {
-                            current_player.stamina.0 -= stamina_loss.0;
-                        } else {
-                            //GAMEOVER
-                            current_player.stamina = Unorm64(0);
-                            ev_game.send(GameEvent::GameOver { loser: handle});
+                    }else{
+                        if local_player.stamina == Unorm64(0) && remote_player.stamina == Unorm64(0) {
+                            println!("Beginning final clash");
+                            *game_state = GameState::FinalClash;
                         }
                     }
+
+
                 }
             }
         }
