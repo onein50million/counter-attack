@@ -1,9 +1,7 @@
-use std::time::Instant;
-
-use bevy::prelude::{BackgroundColor, *};
+use bevy::{prelude::{BackgroundColor, *}, core_pipeline::bloom::BloomSettings};
 use iunorm::Inorm64;
 
-use crate::{BlockEvent, FrameOffset, LastTickTime, LocalMarker, Player, FinalClashLives, GameState, FinalClash};
+use crate::{BlockEvent, FrameOffset, LastTickTime, LocalMarker, Player, FinalClashLives, GameState, FinalClash, AssetLoadingState};
 
 #[derive(Component)]
 struct MovingCaret;
@@ -26,20 +24,25 @@ impl Plugin for GUI {
         app.insert_resource(Roboto(
             app.world.resource::<AssetServer>().load("roboto.ttf"),
         ))
-        .add_startup_system(setup_timing_indicator)
-        .add_startup_system(setup_stamina_bar)
-        .add_startup_system(setup_block_quality)
-        .add_startup_system(setup_final_clash_lives)
-        .add_startup_system(setup_state_viewer)
-        .add_system(handle_block_event)
-        .add_system(update_block_quality)
-        .add_system(update_stamina_bar)
-        .add_system(move_caret)
-        .add_system(move_remote_caret)
-        .add_system(update_local_final_clash_lives.run_if(resource_exists_and_equals(GameState::FinalClash)))
-        .add_system(update_remote_final_clash_lives.run_if(resource_exists_and_equals(GameState::FinalClash)))
-        .add_system(move_caret_final_clash.run_if(resource_exists_and_equals(GameState::FinalClash)))
-        .add_system(update_state_viewer);
+        .add_systems((
+            setup_timing_indicator,
+            setup_stamina_bar,
+            setup_block_quality,
+            setup_final_clash_lives,
+            setup_state_viewer,
+        ).in_schedule(OnEnter(AssetLoadingState::Done)))
+        .add_systems((
+            handle_block_event,
+            update_block_quality,
+            update_local_stamina_bar,
+            update_remote_stamina_bar,
+            move_caret,
+            move_remote_caret,
+            update_local_final_clash_lives.run_if(resource_exists_and_equals(GameState::FinalClash)),
+            update_remote_final_clash_lives.run_if(resource_exists_and_equals(GameState::FinalClash)),
+            move_caret_final_clash.run_if(resource_exists_and_equals(GameState::FinalClash)),
+            update_state_viewer,
+        ).distributive_run_if(in_state(AssetLoadingState::Done)));
     }
 }
 
@@ -139,26 +142,77 @@ fn setup_stamina_bar(mut commands: Commands) {
                     background_color: BackgroundColor(Color::GREEN),
                     ..Default::default()
                 })
+                .insert(StaminaBar).insert(LocalMarker);
+        });
+    commands
+        .spawn(NodeBundle {
+            style: Style {
+                size: Size {
+                    width: Val::Percent(80.0),
+                    height: Val::Percent(5.0),
+                },
+                justify_content: JustifyContent::Center,
+                position_type: PositionType::Absolute,
+                position: UiRect {
+                    bottom: Val::Percent(20.0),
+                    left: Val::Percent(10.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            background_color: BackgroundColor(Color::BLACK),
+            ..Default::default()
+        })
+        .with_children(|parent| {
+            parent
+                .spawn(NodeBundle {
+                    style: Style {
+                        size: Size::all(Val::Percent(100.0)),
+                        justify_content: JustifyContent::Start,
+                        align_content: AlignContent::Start,
+                        position_type: PositionType::Absolute,
+                        position: UiRect {
+                            bottom: Val::Percent(0.0),
+                            left: Val::Percent(0.0),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    background_color: BackgroundColor(Color::RED),
+                    ..Default::default()
+                })
                 .insert(StaminaBar);
         });
 }
 
-fn update_stamina_bar(
-    mut query: Query<&mut Style, With<StaminaBar>>,
-    remote_player: Query<&Player, Without<LocalMarker>>,
-    local_player: Query<&Player, With<LocalMarker>>,
+fn update_local_stamina_bar(
+    mut query: Query<&mut Style, (With<StaminaBar>, With<LocalMarker>)>,
+    player: Query<&Player, With<LocalMarker>>,
 ) {
-    let _remote_player = remote_player.single();
-    let local_player = local_player.single();
+    let player = player.single();
     let mut style = query.single_mut();
-    style.size.width = Val::Percent(local_player.stamina.to_f32() * 100.0)
+    style.size.width = Val::Percent(player.stamina.to_f32() * 100.0)
+}
+fn update_remote_stamina_bar(
+    mut query: Query<&mut Style, (With<StaminaBar>, Without<LocalMarker>)>,
+    player: Query<&Player, Without<LocalMarker>>,
+) {
+    let player = player.single();
+    let mut style = query.single_mut();
+    style.size.width = Val::Percent(player.stamina.to_f32() * 100.0)
 }
 
 fn setup_timing_indicator(mut commands: Commands, roboto: Res<Roboto>) {
     commands.spawn(Camera3dBundle {
-        transform: Transform::from_xyz(0.0, 0.0, -10.0),
+        transform: Transform::from_xyz(0.0, 0.0, 10.0),
+        camera: Camera{
+            hdr: true,
+            ..Default::default()
+        },
         ..Default::default()
-    });
+    }).insert(
+        BloomSettings::default()
+    );
     let font = &roboto.0;
     // let font: Handle<Font> = asset_server.load("roboto.ttf");
 
@@ -255,20 +309,15 @@ fn move_caret(
     let remote_player = remote_player.single();
     let local_player = local_player.single();
     if let Some(current_attack) = &remote_player.current_attack {
-        let start_instant = remote_player.attack_start_time.to_instant(&last_tick_time);
-        let impact_instant = start_instant + current_attack.startup_time;
-        let now =
-            FrameOffset::from_instant(Instant::now(), &last_tick_time).to_instant(&last_tick_time);
-        let offset = if now > impact_instant {
-            now.duration_since(impact_instant).as_secs_f32()
-        } else {
-            -impact_instant.duration_since(now).as_secs_f32()
-        };
+        let start_offset = remote_player.attack_start_time;
+        let impact_offset = start_offset + current_attack.startup_time;
+        let now = FrameOffset::now(&last_tick_time);
+        let offset = now.get_offset_seconds(&impact_offset);
 
-        style.position.left = Val::Percent(50.0 + offset * 100.0);
+        style.position.left = Val::Percent(50.0 + offset.0 as f32 * 100.0);
     } else {
         style.position.left =
-            Val::Percent(50.0 - (Inorm64(local_player.last_defend_result).to_f32() * 100.0))
+            Val::Percent(50.0 + (Inorm64(local_player.last_defend_result).to_f32() * 100.0))
     }
 }
 
@@ -282,19 +331,15 @@ fn move_remote_caret(
     let remote_player = remote_player.single();
     let local_player = local_player.single();
     if let Some(current_attack) = &local_player.current_attack {
-        let start_instant = local_player.attack_start_time.to_instant(&last_tick_time);
-        let impact_instant = start_instant + current_attack.startup_time;
-        let now =
-            FrameOffset::from_instant(Instant::now(), &last_tick_time).to_instant(&last_tick_time);
-        let offset = if now > impact_instant {
-            -now.duration_since(impact_instant).as_secs_f32()
-        } else {
-            impact_instant.duration_since(now).as_secs_f32()
-        };
-        style.position.left = Val::Percent(50.0 + offset * 100.0);
+        let start_offset = local_player.attack_start_time;
+        let impact_offset = start_offset + current_attack.startup_time;
+        let now = FrameOffset::now(&last_tick_time);
+        let offset = now.get_offset_seconds(&impact_offset);
+
+        style.position.left = Val::Percent(50.0 + offset.0 as f32 * 100.0);
     } else {
         style.position.left =
-            Val::Percent(50.0 - (Inorm64(remote_player.last_defend_result).to_f32() * 100.0))
+            Val::Percent(50.0 + (Inorm64(remote_player.last_defend_result).to_f32() * 100.0))
     }
 }
 
@@ -305,10 +350,9 @@ fn move_caret_final_clash(
 ) {
     let mut style = style_query.single_mut();
     if let Some(next_clash) = final_clash.next_clash{
-        // dbg!(next_clash);
-        let now = FrameOffset::from_instant(Instant::now(), &last_tick_time).to_instant(&last_tick_time);
+        let now = FrameOffset::now(&last_tick_time);
         style.position.left =
-            Val::Percent(50.0 - (dbg!(FrameOffset::from_instant(now, &last_tick_time).get_offset_seconds(&next_clash, &last_tick_time)) * 100.0 )as f32)
+            Val::Percent(50.0 + (now.get_offset_seconds(&next_clash).0 * 100.0 )as f32)
 
     }
 }
@@ -319,7 +363,7 @@ fn setup_state_viewer(mut commands: Commands, roboto: Res<Roboto>){
             "game state here",
             TextStyle {
                 font: roboto.0.clone(),
-                font_size: 48.0,
+                font_size: 8.0,
                 color: Color::WHITE,
                 ..Default::default()
             },
@@ -331,8 +375,8 @@ fn setup_state_viewer(mut commands: Commands, roboto: Res<Roboto>){
             align_content: AlignContent::Center,
             position_type: PositionType::Absolute,
             position: UiRect {
-                bottom: Val::Percent(10.0),
-                right: Val::Percent(10.0),
+                bottom: Val::Percent(2.0),
+                right: Val::Percent(2.0),
                 ..Default::default()
             },
             ..Default::default()
@@ -344,7 +388,6 @@ fn setup_state_viewer(mut commands: Commands, roboto: Res<Roboto>){
 fn update_state_viewer(
     game_state: Res<GameState>,
     mut text_query: Query<&mut Text, With<GameStateViewer>>,
-    
 ){
     text_query.single_mut().sections[0].value = format!("{:?}", game_state);
 }
@@ -353,7 +396,7 @@ fn setup_final_clash_lives(mut commands: Commands, roboto: Res<Roboto>){
     commands
         .spawn(TextBundle {
             text: Text::from_section(
-                "lives",
+                "",
                 TextStyle {
                     font: roboto.0.clone(),
                     font_size: 48.0,
@@ -381,7 +424,7 @@ fn setup_final_clash_lives(mut commands: Commands, roboto: Res<Roboto>){
     commands
         .spawn(TextBundle {
             text: Text::from_section(
-                "lives",
+                "",
                 TextStyle {
                     font: roboto.0.clone(),
                     font_size: 48.0,

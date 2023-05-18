@@ -7,6 +7,10 @@ edition = "2021"
 
 [dependencies]
 bevy = "0.10.1"
+bevy_asset_loader = { version = "0.16.0", features = ["2d"] }
+bevy_easings = "0.10.0"
+bevy_hanabi = "0.6.1"
+bevy_sprite3d = "2.4.0"
 bytemuck = "1.13.1"
 clap = { version = "4.2.7", features = ["derive"] }
 ggrs = { version = "0.9.4", features = ["sync-send"] }

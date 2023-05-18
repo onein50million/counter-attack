@@ -396,6 +396,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_asset_loader"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f32463c4be049c9535661f2debcd76a6ee7fc5c0e0c2335214bda671607ae7d9"
+dependencies = [
+ "anyhow",
+ "bevy",
+ "bevy_asset_loader_derive",
+]
+
+[[package]]
+name = "bevy_asset_loader_derive"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2921646f30d11ae14b85e4957242dcb98c37b748987b00b84473fcd390c561dd"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
+]
+
+[[package]]
 name = "bevy_audio"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -473,6 +495,16 @@ dependencies = [
  "bevy_time",
  "bevy_utils",
  "sysinfo",
+]
+
+[[package]]
+name = "bevy_easings"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3d00078837ace3e96d56c332a5cadf0c7c7a7021f8952d05e6a27f226405f3d"
+dependencies = [
+ "bevy",
+ "interpolation",
 ]
 
 [[package]]
@@ -557,6 +589,24 @@ dependencies = [
  "gltf",
  "percent-encoding",
  "thiserror",
+]
+
+[[package]]
+name = "bevy_hanabi"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0624f5ece27bcac695cd0b4bf87462e3fa8b6912e78468f9c22d1cd781d838d"
+dependencies = [
+ "anyhow",
+ "bevy",
+ "bitflags",
+ "bytemuck",
+ "copyless",
+ "rand",
+ "rand_pcg",
+ "ron",
+ "serde",
+ "typetag",
 ]
 
 [[package]]
@@ -837,6 +887,15 @@ dependencies = [
  "guillotiere",
  "rectangle-pack",
  "thiserror",
+]
+
+[[package]]
+name = "bevy_sprite3d"
+version = "2.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f873dd5be1022006f78f57cefb939e5f6bd106fda335da6170abb974e20ce28"
+dependencies = [
+ "bevy",
 ]
 
 [[package]]
@@ -1278,6 +1337,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6051f239ecec86fde3410901ab7860d458d160371533842974fc61f96d15879b"
 
 [[package]]
+name = "copyless"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2df960f5d869b2dd8532793fde43eb5427cceb126c929747a26823ab0eeb536"
+
+[[package]]
 name = "core-foundation"
 version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1349,6 +1414,10 @@ name = "counter-attack"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "bevy_asset_loader",
+ "bevy_easings",
+ "bevy_hanabi",
+ "bevy_sprite3d",
  "bytemuck",
  "clap",
  "ggrs",
@@ -1678,6 +1747,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ghost"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e77ac7b51b8e6313251737fcef4b1c01a2ea102bde68415b62c0ee9268fec357"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.15",
+]
+
+[[package]]
 name = "gilrs"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1966,6 +2046,21 @@ dependencies = [
  "js-sys",
  "wasm-bindgen",
  "web-sys",
+]
+
+[[package]]
+name = "interpolation"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3b7357d2bbc5ee92f8e899ab645233e43d21407573cceb37fed8bc3dede2c02"
+
+[[package]]
+name = "inventory"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0539b5de9241582ce6bd6b0ba7399313560151e58c9aaf8b74b711b1bdce644"
+dependencies = [
+ "ghost",
 ]
 
 [[package]]
@@ -2758,6 +2853,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rand_pcg"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59cad018caf63deb318e5a4586d99a24424a364f40f1e5778c29aca23f4fc73e"
+dependencies = [
+ "rand_core",
+]
+
+[[package]]
 name = "range-alloc"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3233,6 +3337,30 @@ checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
 dependencies = [
  "cfg-if",
  "static_assertions",
+]
+
+[[package]]
+name = "typetag"
+version = "0.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a6898cc6f6a32698cc3e14d5632a14d2b23ed9f7b11e6b8e05ce685990acc22"
+dependencies = [
+ "erased-serde",
+ "inventory",
+ "once_cell",
+ "serde",
+ "typetag-impl",
+]
+
+[[package]]
+name = "typetag-impl"
+version = "0.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c3e1c30cedd24fc597f7d37a721efdbdc2b1acae012c1ef1218f4c7c2c0f3e7"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.15",
 ]
 
 [[package]]
